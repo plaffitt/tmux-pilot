@@ -1,0 +1,10 @@
+# Textes de la visite guidée en français (voir en.sh pour les règles).
+M_PRESS_ENTER='Appuie sur Entrée pour continuer'
+M_HELLO='Bonjour ! Voici une courte visite de la façon dont je pilote tes panes tmux. J’ai pris le contrôle de ce pane : sa bordure affiche « Claude pilote ce pane ». Le préfixe [claude 0] du prompt signale un bash enfant que j’ai lancé, avec son propre fichier d’historique, ~/.bash_history_claude : rien de ce que je tape ici n’arrive dans ton historique.'
+M_COLORS='Quand je lis ou écris dans un pane, il passe en orange foncé et sa bordure ajoute (travail en cours). N’y tape rien à ce moment-là : tes touches se mélangeraient aux miennes et je risquerais de mal lire le résultat. Quand j’attends une action de ta part, comme maintenant, le pane passe en violet et la bordure affiche (c’est à vous) : là, c’est à toi de taper. Après Entrée, je lance `sleep 3` : regarde le pane rester orange.'
+M_PAUSE='Dès que tu auras appuyé sur Entrée, j’arrête de toucher au terminal pendant 10 s. 5 s après ma dernière action, tu verras le pane passer en gris : je n’y touche plus, mais j’en garde le contrôle.'
+M_STATUS='Le chiffre de [claude 0] est le code de retour de la dernière commande : c’est là que je le lis, même si ton propre prompt ne l’affiche pas. Après Entrée, je lance `false`, qui échoue : regarde le préfixe passer à [claude 1].'
+M_RC='J’ai lu le code de retour de `false` : %s.'
+M_SCRIPT='Je colle les scripts plus longs d’un bloc, puis sh les exécute. Après Entrée, je colle une petite boucle de plusieurs lignes.'
+M_STOP='Je peux arrêter une commande qui dure trop avec Ctrl-C. Après Entrée, je lance `sleep 60` et je l’arrête 3 s plus tard.'
+M_BYE='Visite terminée ! Après Entrée, je quitte mon bash enfant et je te rends le pane : il retrouve son apparence habituelle. Si tu tapes toi-même `exit` dans mon bash enfant, je te rends le pane de la même façon.'

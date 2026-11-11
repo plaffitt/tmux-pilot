@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# One step of the onboarding tour, typed by Claude in the demo pane: `onboarding <step> [value]`.
+# Prints the text of the step, then hands the pane over to the user (purple, "c'est à vous") until
+# they press Enter, so the user sets the pace.
+# child-rc.sh puts this directory in PATH and sets CLAUDE_ONBOARD_MESSAGES (the texts in the user's
+# language) from the pane options that onboarding.sh sets.
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+messages=${CLAUDE_ONBOARD_MESSAGES:-$here/../onboarding-messages/en.sh}
+# shellcheck source=../onboarding-messages/en.sh
+source "$messages"
+
+step=${1:?usage: onboarding <step> [value]}
+var=M_${step^^}
+[[ -n ${!var:-} ]] || { echo "onboarding: unknown step '$step'" >&2; exit 64; }
+
+pane() { [[ -z ${TMUX_PANE:-} ]] || bash "$here/../pane.sh" "$@" "$TMUX_PANE" >/dev/null; }
+
+echo
+# shellcheck disable=SC2059
+printf "\e[1m${!var}\e[0m\n" "${2:-}"
+printf '\n\e[2m%s\e[0m' "$M_PRESS_ENTER"
+pane handover
+read -r -s
+pane takeback
+echo

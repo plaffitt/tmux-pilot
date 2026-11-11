@@ -1,0 +1,13 @@
+{
+  "name": "tmux-pilot",
+  "description": "Lets Claude drive your tmux panes safely, with clear signs of who is typing",
+  "owner": {
+    "name": "Paul Laffitte"
+  },
+  "plugins": [
+    {
+      "name": "tmux-pilot",
+      "source": "./"
+    }
+  ]
+}

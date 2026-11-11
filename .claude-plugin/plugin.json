@@ -1,0 +1,19 @@
+{
+  "name": "tmux-pilot",
+  "version": "0.1.0",
+  "description": "Lets Claude drive your tmux panes safely: it claims a pane, types in a child bash that keeps your history clean, shows when it works (orange), holds (grey) or waits for you (purple), and gives the pane back as it was",
+  "author": {
+    "name": "Paul Laffitte",
+    "url": "https://github.com/plaffitt"
+  },
+  "homepage": "https://github.com/plaffitt/tmux-pilot",
+  "repository": "https://github.com/plaffitt/tmux-pilot",
+  "license": "MIT",
+  "keywords": [
+    "tmux",
+    "terminal",
+    "ssh",
+    "pane",
+    "agent"
+  ]
+}
