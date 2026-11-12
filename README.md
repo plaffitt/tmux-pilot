@@ -6,9 +6,11 @@ Claude claims a pane, types in it, reads what comes back, and gives the pane bac
 
 | Pane | Border | Meaning |
 |---|---|---|
-| dark orange | Claude pilote ce pane (travail en cours) | Claude is working in it: do not type there |
-| very dark grey | Claude pilote ce pane | Claude holds it but does nothing in it |
-| dark purple | Claude pilote ce pane (c’est à vous) | Claude waits for you: a key to press, a password to type |
+| dark orange | Claude is driving this pane (working) | Claude is working in it: do not type there |
+| very dark grey | Claude is driving this pane | Claude holds it but does nothing in it |
+| dark purple | Claude is driving this pane (your turn) | Claude waits for you: a key to press, a password to type |
+
+The border follows Claude Code's `language` setting: French when it is set to French, English otherwise. The guided tour speaks your language.
 
 ## What it does
 

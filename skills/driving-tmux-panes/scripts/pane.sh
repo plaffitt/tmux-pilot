@@ -67,7 +67,36 @@ IDLE_STYLE='bg=#1a1a1a'
 WAIT_STYLE='bg=#1c1026'
 # It sits inside a #{?cond,yes,no} format: a bare comma would end the branch, but a nested
 # #{?...} is fine since tmux skips over braces.
-CLAIM_BANNER='#{?@claude_wait,#[bold fg=#b07cd8] Claude pilote ce pane (c’est à vous) ,#{?@claude_busy,#[bold fg=#d2691e] Claude pilote ce pane (travail en cours) ,#[bold fg=#5a5a5a] Claude pilote ce pane }}#[default]'
+# The labels come from pane options set at claim time, in the language of Claude Code (en or fr), so
+# each pane shows its own; their values may hold commas, since tmux only parses the format around them.
+CLAIM_BANNER='#{?@claude_wait,#[bold fg=#b07cd8] #{@claude_label_wait} ,#{?@claude_busy,#[bold fg=#d2691e] #{@claude_label_busy} ,#[bold fg=#5a5a5a] #{@claude_label} }}#[default]'
+
+# The language Claude Code speaks: its `language` setting, a free text such as "Français" or "English",
+# from the project's local settings, the project's settings, then the user's. French gives fr, anything
+# else (or no setting) en. Read with sed: settings files are plain JSON, and no jq is needed.
+claude_lang() {
+  local f v
+  for f in .claude/settings.local.json .claude/settings.json ~/.claude/settings.json; do
+    [[ -r $f ]] || continue
+    v=$(sed -n 's/.*"language"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$f" | head -n 1)
+    [[ -n $v ]] && break
+  done
+  shopt -s nocasematch
+  if [[ ${v:-} =~ ^[[:space:]]*(fr([-_].*)?|fran[cç]ais.*|french.*)[[:space:]]*$ ]]; then echo fr; else echo en; fi
+  shopt -u nocasematch
+}
+
+# Border labels per language: holding, working, waiting for the user.
+set_labels() {
+  local held busy wait
+  case $2 in
+    fr) held='Claude pilote ce pane' busy='Claude pilote ce pane (travail en cours)' wait='Claude pilote ce pane (c’est à vous)' ;;
+    *) held='Claude is driving this pane' busy='Claude is driving this pane (working)' wait='Claude is driving this pane (your turn)' ;;
+  esac
+  tmux set -p -t "$1" @claude_label "$held"
+  tmux set -p -t "$1" @claude_label_busy "$busy"
+  tmux set -p -t "$1" @claude_label_wait "$wait"
+}
 
 # @claude_busy holds a token while Claude works in the pane: cmd-<id> while a sent command runs,
 # act-<id> after any other action. Each watcher only clears its own token.
@@ -280,6 +309,9 @@ release_pane() {
   tmux set -p -u -t "$1" @claude_cmd
   tmux set -p -u -t "$1" @claude_exited
   tmux set -p -u -t "$1" @claude_session
+  tmux set -p -u -t "$1" @claude_label
+  tmux set -p -u -t "$1" @claude_label_busy
+  tmux set -p -u -t "$1" @claude_label_wait
   tmux set -p -u -t "$1" @claude_turn_over
   tmux set -p -u -t "$1" @claude_child
 }
@@ -488,8 +520,10 @@ case $cmd in
     cmd_done "$@"
     ;;
   claim)
+    # The border speaks the user's language: Claude Code's language setting.
     [[ $# -eq 1 ]] || usage
     check_id "$1"
+    set_labels "$1" "$(claude_lang)"
     restore_unclaimed_windows
     win=$(tmux display-message -p -t "$1" '#{window_id}')
     if [[ -z $(tmux show -wqv -t "$win" @claude_saved) ]]; then
