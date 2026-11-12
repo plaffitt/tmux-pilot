@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # One step of the onboarding tour, typed by Claude in the demo pane: `onboarding <step> [value]`.
-# Prints the text of the step, then hands the pane over to the user (purple, "c'est à vous") until
+# Prints the text of the step, then hands the pane over to the user (purple, "your turn") until
 # they press Enter, so the user sets the pace.
 # child-rc.sh puts this directory in PATH and sets CLAUDE_ONBOARD_MESSAGES (the texts in the user's
 # language) from the pane options that onboarding.sh sets.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
-messages=${CLAUDE_ONBOARD_MESSAGES:-$here/../onboarding-messages/en.sh}
-# shellcheck source=../onboarding-messages/en.sh
+messages=${CLAUDE_ONBOARD_MESSAGES:-$here/../messages/en.sh}
+# shellcheck source=../messages/en.sh
 source "$messages"
 
 step=${1:?usage: onboarding <step> [value]}

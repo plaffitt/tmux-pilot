@@ -3,8 +3,8 @@
 # Each explanation is a short `onboarding <step>` command typed in the pane: it prints the text of the
 # step and waits for the user to press Enter, so the user sets the pace. Real commands run between
 # the steps. Each step is logged on stdout so Claude can relay it.
-# usage: onboarding.sh [lang|messages-file] [target] [below|above|left|right]
-#   lang: a file name in onboarding-messages/ (en, fr); messages-file: a translation of en.sh.
+# It speaks Claude Code's language: English, or the translation of messages/en.sh (see lang.sh).
+# usage: onboarding.sh [target] [below|above|left|right]
 #   target: a window or pane to open a new pane next to (default: the active pane of the current
 #   session), on the given side (default: below); or a pane ID such as %3 with no side, to run the
 #   tour in that existing pane, which must sit idle at its prompt.
@@ -14,9 +14,12 @@ here=$(cd "$(dirname "$0")" && pwd)
 pane() { bash "$here/pane.sh" "$@"; }
 log() { printf '[%s] %s\n' "$(date +%T)" "$*"; }
 
-lang=${1:-en}
-if [[ -f $lang ]]; then messages=$(realpath "$lang"); else messages=$here/onboarding-messages/$lang.sh; fi
-[[ -r $messages ]] || { echo "onboarding: no messages for '$lang' (translate $here/onboarding-messages/en.sh)" >&2; exit 1; }
+# shellcheck source=lang.sh
+source "$here/lang.sh"
+messages=$(messages_file) || {
+  echo "onboarding: no translation yet for Claude Code's language: translate $MESSAGES_EN into $messages (see SKILL.md, Language), then run the tour again" >&2
+  exit 1
+}
 
 # A regex matching the final character of the pane's last non-blank line (the prompt sign).
 prompt_re() {
@@ -48,18 +51,19 @@ step() {
   ((rc == 0)) || { echo "onboarding: step $1 failed with status $rc in $P" >&2; exit 1; }
 }
 
-target=${2:-$(tmux display-message -p '#{window_id}')}
-if [[ $target =~ ^%[0-9]+$ && -z ${3:-} ]]; then
+target=${1:-$(tmux display-message -p '#{window_id}')}
+side=${2:-}
+if [[ $target =~ ^%[0-9]+$ && -z $side ]]; then
   P=$target
   log "running the tour in the existing pane $P"
 else
   # Always bash, whatever the user's shell: enter needs it.
-  case ${3:-below} in
-    below) side=(-v) ;; above) side=(-v -b) ;; right) side=(-h) ;; left) side=(-h -b) ;;
+  case ${side:-below} in
+    below) flags=(-v) ;; above) flags=(-v -b) ;; right) flags=(-h) ;; left) flags=(-h -b) ;;
     *) echo "onboarding: side must be below, above, left or right" >&2; exit 64 ;;
   esac
-  P=$(tmux split-window -d "${side[@]}" -t "$target" -P -F '#{pane_id}' bash)
-  log "opened $P ${3:-below} $target"
+  P=$(tmux split-window -d "${flags[@]}" -t "$target" -P -F '#{pane_id}' bash)
+  log "opened $P ${side:-below} $target"
   sleep 1
 fi
 # child-rc.sh reads these when enter starts the child bash: it puts the `onboarding` command in PATH

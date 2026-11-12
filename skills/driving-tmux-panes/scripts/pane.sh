@@ -67,7 +67,29 @@ IDLE_STYLE='bg=#1a1a1a'
 WAIT_STYLE='bg=#1c1026'
 # It sits inside a #{?cond,yes,no} format: a bare comma would end the branch, but a nested
 # #{?...} is fine since tmux skips over braces.
-CLAIM_BANNER='#{?@claude_wait,#[bold fg=#b07cd8] Claude pilote ce pane (c’est à vous) ,#{?@claude_busy,#[bold fg=#d2691e] Claude pilote ce pane (travail en cours) ,#[bold fg=#5a5a5a] Claude pilote ce pane }}#[default]'
+# The labels come from pane options set at claim time, in the language of Claude Code (en or fr), so
+# each pane shows its own; their values may hold commas, since tmux only parses the format around them.
+CLAIM_BANNER='#{?@claude_wait,#[bold fg=#b07cd8] #{@claude_label_wait} ,#{?@claude_busy,#[bold fg=#d2691e] #{@claude_label_busy} ,#[bold fg=#5a5a5a] #{@claude_label} }}#[default]'
+
+# shellcheck source=lang.sh
+source "$(cd "$(dirname "$0")" && pwd)/lang.sh"
+
+# Border labels (holding, working, waiting for the user) in Claude Code's language: from the
+# translation of messages/en.sh when there is one, in English otherwise. A missing translation is not
+# an error: the border stays English, and Claude is told where to write the translation.
+set_labels() {
+  local file held busy wait
+  file=$(messages_file) || echo "pane.sh: no translation yet for Claude Code's language: translate $MESSAGES_EN into $file (see SKILL.md, Language), then run claim again; the border is in English until then"
+  IFS=$'\t' read -r held busy wait < <(
+    # shellcheck source=messages/en.sh
+    source "$MESSAGES_EN"
+    [[ ! -r $file ]] || source "$file"
+    printf '%s\t%s\t%s\n' "$M_BORDER" "$M_BORDER_BUSY" "$M_BORDER_WAIT"
+  )
+  tmux set -p -t "$1" @claude_label "$held"
+  tmux set -p -t "$1" @claude_label_busy "$busy"
+  tmux set -p -t "$1" @claude_label_wait "$wait"
+}
 
 # @claude_busy holds a token while Claude works in the pane: cmd-<id> while a sent command runs,
 # act-<id> after any other action. Each watcher only clears its own token.
@@ -280,6 +302,9 @@ release_pane() {
   tmux set -p -u -t "$1" @claude_cmd
   tmux set -p -u -t "$1" @claude_exited
   tmux set -p -u -t "$1" @claude_session
+  tmux set -p -u -t "$1" @claude_label
+  tmux set -p -u -t "$1" @claude_label_busy
+  tmux set -p -u -t "$1" @claude_label_wait
   tmux set -p -u -t "$1" @claude_turn_over
   tmux set -p -u -t "$1" @claude_child
 }
@@ -488,8 +513,10 @@ case $cmd in
     cmd_done "$@"
     ;;
   claim)
+    # The border speaks the user's language: Claude Code's language setting.
     [[ $# -eq 1 ]] || usage
     check_id "$1"
+    set_labels "$1"
     restore_unclaimed_windows
     win=$(tmux display-message -p -t "$1" '#{window_id}')
     if [[ -z $(tmux show -wqv -t "$win" @claude_saved) ]]; then
@@ -525,7 +552,7 @@ case $cmd in
     ;;
   handover)
     # Claude waits for the user to act in the pane (a key to press, an answer to type): purple,
-    # "c'est à vous". Ends with takeback, or as soon as Claude types in the pane again.
+    # "your turn". Ends with takeback, or as soon as Claude types in the pane again.
     [[ $# -eq 1 ]] || usage
     check_id "$1"
     [[ -n $(tmux show -pqv -t "$1" @claude) ]] || die "pane $1 is not claimed"
