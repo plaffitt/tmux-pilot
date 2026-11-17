@@ -44,7 +44,7 @@ wait_result() {
     ((SECONDS - start < ${ONBOARDING_IDLE_MAX:-1800})) || { echo "onboarding: nobody pressed Enter, stopping" >&2; exit 1; }
   done
 }
-run() { wait_result "$(pane send "$P" "$RE" "$1" | sed 's/^id=//')"; }
+run() { wait_result "$(pane send "$P" "$RE" "$1" | sed -n 's/^id=//p')"; }
 step() {
   log "step $*: waiting for Enter"
   run "onboarding $*"
@@ -119,12 +119,12 @@ log "read exit status $false_rc"
 step script
 script=$(mktemp)
 printf 'for i in 1 2 3; do\n  date +%%T\n  sleep 1\ndone\n' >"$script"
-wait_result "$(pane paste "$P" "$RE" "$script" | sed 's/^id=//')"
+wait_result "$(pane paste "$P" "$RE" "$script" | sed -n 's/^id=//p')"
 rm -f "$script"
 log "pasted a multi-line loop"
 
 step stop
-id=$(pane send "$P" "$RE" 'sleep 60' | sed 's/^id=//')
+id=$(pane send "$P" "$RE" 'sleep 60' | sed -n 's/^id=//p')
 sleep 3
 pane interrupt "$P" >/dev/null
 wait_result "$id"

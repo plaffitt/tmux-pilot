@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Drive a user's existing tmux pane: read it, type into it, collect output.
-# Read-only subcommands: list, state, tail, result. Writing ones: send, paste.
+# Read-only subcommands: list, state, tail, result, wait. Writing ones: send, paste.
 set -euo pipefail
 
 usage() {
@@ -13,6 +13,7 @@ usage:
   pane.sh send   <%pane> <prompt-regex> <command>
   pane.sh paste  <%pane> <prompt-regex> <script-file>
   pane.sh result <%pane> <id> [timeout-seconds]
+  pane.sh wait   <%pane> <id> [--match <regex>] [--quiet <seconds>]
   pane.sh claim   <%pane>
   pane.sh release <%pane>
   pane.sh interrupt <%pane>
@@ -28,8 +29,11 @@ die() { echo "pane.sh: $*" >&2; exit 1; }
 
 check_id() {
   [[ $1 =~ ^%[0-9]+$ ]] || die "target must be a pane ID such as %3, not '$1'"
-  tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1 || die "pane $1 does not exist"
+  alive "$1" || die "pane $1 does not exist"
 }
+
+# tmux 3.4 prints nothing but exits 0 for a pane that does not exist: compare the ID it prints.
+alive() { [[ $(tmux display-message -p -t "$1" '#{pane_id}' 2>/dev/null) == "$1" ]]; }
 
 last_line() {
   tmux capture-pane -p -J -t "$1" -S -50 | { grep -v '^[[:space:]]*$' || true; } | tail -n 1
@@ -61,7 +65,8 @@ new_id() { printf '%s%05d' "$(date +%s)" "$RANDOM"; }
 
 # Look of a claimed pane: a tinted background and a banner in its top border. Dark orange while
 # Claude works in the pane, very dark grey while it holds the pane but does nothing in it, dark purple
-# while it waits for the user to act in it (handover): a key to press, an answer to type.
+# while it waits for the user to act in it (handover): a key to press, an answer to type. Grey with an
+# orange "(command running)" label when Claude's turn is over but a command it sent still runs.
 BUSY_STYLE='bg=#170c00'
 IDLE_STYLE='bg=#1a1a1a'
 WAIT_STYLE='bg=#1c1026'
@@ -69,26 +74,28 @@ WAIT_STYLE='bg=#1c1026'
 # #{?...} is fine since tmux skips over braces.
 # The labels come from pane options set at claim time, in the language of Claude Code (en or fr), so
 # each pane shows its own; their values may hold commas, since tmux only parses the format around them.
-CLAIM_BANNER='#{?@claude_wait,#[bold fg=#b07cd8] #{@claude_label_wait} ,#{?@claude_busy,#[bold fg=#d2691e] #{@claude_label_busy} ,#[bold fg=#5a5a5a] #{@claude_label} }}#[default]'
+CLAIM_BANNER='#{?@claude_wait,#[bold fg=#b07cd8] #{@claude_label_wait} ,#{?@claude_running,#[bold fg=#d2691e] #{@claude_label_running} ,#{?@claude_busy,#[bold fg=#d2691e] #{@claude_label_busy} ,#[bold fg=#5a5a5a] #{@claude_label} }}}#[default]'
 
 # shellcheck source=lang.sh
 source "$(cd "$(dirname "$0")" && pwd)/lang.sh"
 
-# Border labels (holding, working, waiting for the user) in Claude Code's language: from the
-# translation of messages/en.sh when there is one, in English otherwise. A missing translation is not
-# an error: the border stays English, and Claude is told where to write the translation.
+# Border labels (holding, working, waiting for the user, command running) in Claude Code's language:
+# from the translation of messages/en.sh when there is one, in English otherwise. A missing translation
+# is not an error: the border stays English, and Claude is told where to write the translation. A
+# label the translation lacks stays English too, since en.sh is read first.
 set_labels() {
-  local file held busy wait
+  local file held busy wait running
   file=$(messages_file) || echo "pane.sh: no translation yet for Claude Code's language: translate $MESSAGES_EN into $file (see SKILL.md, Language), then run claim again; the border is in English until then"
-  IFS=$'\t' read -r held busy wait < <(
+  IFS=$'\t' read -r held busy wait running < <(
     # shellcheck source=messages/en.sh
     source "$MESSAGES_EN"
     [[ ! -r $file ]] || source "$file"
-    printf '%s\t%s\t%s\n' "$M_BORDER" "$M_BORDER_BUSY" "$M_BORDER_WAIT"
+    printf '%s\t%s\t%s\t%s\n' "$M_BORDER" "$M_BORDER_BUSY" "$M_BORDER_WAIT" "$M_BORDER_RUNNING"
   )
   tmux set -p -t "$1" @claude_label "$held"
   tmux set -p -t "$1" @claude_label_busy "$busy"
   tmux set -p -t "$1" @claude_label_wait "$wait"
+  tmux set -p -t "$1" @claude_label_running "$running"
 }
 
 # @claude_busy holds a token while Claude works in the pane: cmd-<id> while a sent command runs,
@@ -113,16 +120,23 @@ paint() {
 UNBUSY='unbusy() {
   [[ $(tmux show -pqv -t "$1" @claude_busy 2>/dev/null) == "$2" ]] || return 0
   tmux set -p -u -t "$1" @claude_busy
+  tmux set -p -u -t "$1" @claude_running
   [[ -n $(tmux show -pqv -t "$1" @claude) ]] || return 0
   [[ -z $(tmux show -pqv -t "$1" @claude_wait) ]] || return 0
   tmux set -p -t "$1" window-style "$3"
   tmux set -p -t "$1" window-active-style "$3"
 }'
 
+# Orange: Claude's turn runs and it touches the pane, so the "(command running)" label is over.
+paint_busy() {
+  tmux set -p -u -t "$1" @claude_running
+  paint "$1" "$BUSY_STYLE"
+}
+
 # While the pane is handed over, Claude's reads keep it purple: the user is the one to act.
 set_busy() {
   tmux set -p -t "$1" @claude_busy "$2"
-  [[ -n $(tmux show -pqv -t "$1" @claude_wait) ]] || paint "$1" "$BUSY_STYLE"
+  [[ -n $(tmux show -pqv -t "$1" @claude_wait) ]] || paint_busy "$1"
 }
 
 # End a handover: back to orange if Claude is still working in the pane, grey otherwise.
@@ -130,17 +144,20 @@ takeback_pane() {
   [[ -n $(tmux show -pqv -t "$1" @claude_wait) ]] || return 0
   tmux set -p -u -t "$1" @claude_wait
   [[ -n $(tmux show -pqv -t "$1" @claude) ]] || return 0
-  if [[ -n $(tmux show -pqv -t "$1" @claude_busy) ]]; then paint "$1" "$BUSY_STYLE"; else paint "$1" "$IDLE_STYLE"; fi
+  if [[ -n $(tmux show -pqv -t "$1" @claude_busy) ]]; then paint_busy "$1"; else paint "$1" "$IDLE_STYLE"; fi
 }
 
 # Show the warning until the turn ends (or the linger runs out). Leaves a running command's token
-# alone unless forced. Only a claimed pane changes colour: reading a pane the user did not hand over
-# leaves it as it is.
+# alone unless forced, but brings orange back if the Stop hook greyed the pane meanwhile. Only a
+# claimed pane changes colour: reading a pane the user did not hand over leaves it as it is.
 touch_busy() {
   local pane=$1 force=${2:-} token
   [[ -n $(tmux show -pqv -t "$pane" @claude) ]] || return 0
   tmux set -p -u -t "$pane" @claude_turn_over
-  [[ -n $force || $(tmux show -pqv -t "$pane" @claude_busy) != cmd-* ]] || return 0
+  if [[ -z $force && $(tmux show -pqv -t "$pane" @claude_busy) == cmd-* ]]; then
+    [[ -n $(tmux show -pqv -t "$pane" @claude_wait) ]] || paint_busy "$pane"
+    return 0
+  fi
   token=act-$(new_id)
   set_busy "$pane" "$token"
   setsid bash -c "$UNBUSY"'
@@ -150,34 +167,28 @@ touch_busy() {
 }
 
 # Show the warning while command <id> runs, then until the turn ends (or the linger runs out): once a
-# [claude <rc>] prompt shows up below line <start>, or, without a start line, once the END marker does.
-# The watcher stops as soon as the token changes (newer action, interrupt, release) or the pane is gone.
+# [claude <rc>] prompt shows up below the command, or the END marker does (internal _end subcommand,
+# which also records the end in @claude_done). The watcher stops as soon as the token changes (newer
+# action, interrupt, release) or the pane is gone.
 mark_busy() {
-  local pane=$1 id=$2 start=${3:-} skip=${4:-} height=${5:-}
+  local pane=$1 id=$2
   [[ -n $(tmux show -pqv -t "$pane" @claude) ]] || return 0
   tmux set -p -u -t "$pane" @claude_turn_over
   set_busy "$pane" "cmd-$id"
   setsid bash -c "$UNBUSY"'
-    pane=$1 id=$2 start=$5 skip=$6 script=$7 height=$8
-    done_yet() {
-      if [[ -n $start ]]; then
-        bash "$script" _done "$pane" "$start" "$skip" "$height" >/dev/null
-      else
-        tmux capture-pane -p -J -t "$pane" -S - | grep -Eq "END_$id rc=[0-9]"
-      fi
-    }
+    pane=$1 id=$2 script=$5
     while [[ $(tmux show -pqv -t "$pane" @claude_busy 2>/dev/null) == "cmd-$id" ]]; do
-      if done_yet; then
+      if bash "$script" _end "$pane" "$id" >/dev/null 2>&1; then
         tmux set -p -t "$pane" @claude_busy "act-$id"
+        tmux set -p -u -t "$pane" @claude_running
         # Claude turn already over (the command outlived it): grey at once.
         [[ -n $(tmux show -pqv -t "$pane" @claude_turn_over) ]] || sleep "$4"
         unbusy "$pane" "act-$id" "$3"
         break
       fi
-      # Reading a few lines after the command is cheap; grepping the whole scrollback is not.
-      if [[ -n $start ]]; then sleep 0.25; else sleep 1; fi
+      sleep 0.25
     done
-  ' _ "$pane" "$id" "$IDLE_STYLE" "$(linger)" "$start" "$skip" "$here/pane.sh" "$height" </dev/null >/dev/null 2>&1 &
+  ' _ "$pane" "$id" "$IDLE_STYLE" "$(linger)" "$here/pane.sh" </dev/null >/dev/null 2>&1 &
 }
 
 clear_busy() { tmux set -p -u -t "$1" @claude_busy 2>/dev/null || true; }
@@ -257,6 +268,36 @@ cmd_output() {
   [[ -z $prefix ]] || printf '%s\n' "$prefix"
 }
 
+# The end of command <id> is recorded once, by whoever spots it first (the busy watcher, wait or
+# result), in @claude_done "<id> <rc> <epoch>"; the others read it there. Only while @claude_cmd still
+# names that command: a newer send clears it.
+record_done() {
+  [[ $(tmux show -pqv -t "$1" @claude_cmd) == "$2 "* ]] || return 0
+  [[ $(tmux show -pqv -t "$1" @claude_done) == "$2 "* ]] && return 0
+  tmux set -p -t "$1" @claude_done "$2 $3 $(date +%s)"
+}
+
+# Exit status of command <id> (mode, start, skip and height as in @claude_cmd) once it is over,
+# recording its end; fails before. In markers mode it looks for END_<id> rc=<n> in the last 50 lines,
+# or in the range of capture-pane -S given as 7th argument ("-" for the whole scrollback).
+cmd_end() {
+  local pane=$1 id=$2 mode=$3 start=${4:-} skip=${5:-} height=${6:-} range=${7:--50} did drc rc
+  read -r did drc _ <<<"$(tmux show -pqv -t "$pane" @claude_done)" || true
+  if [[ $did == "$id" ]]; then
+    echo "$drc"
+    return 0
+  fi
+  if [[ $mode == markers ]]; then
+    # rc=[0-9] never matches the typed command line, which reads rc=$?.
+    rc=$(tmux capture-pane -p -J -t "$pane" -S "$range" | grep -oE "END_$id rc=[0-9]+" | tail -n 1 | sed 's/.*rc=//') || true
+    [[ -n $rc ]] || return 1
+  else
+    rc=$(cmd_done "$pane" "$start" "$skip" "$height") || return 1
+  fi
+  record_done "$pane" "$id" "$rc"
+  echo "$rc"
+}
+
 # Has a prompt of the child bash shown up below absolute line <start>? A [claude <rc>] prompt left
 # on screen by an earlier child does not count.
 child_prompt() { (($(abs_line "$1") > $2)) && lines "$1" $(($2 + 1)) "$(abs_line "$1")" | grep -qE "$PROMPT_TAG"; }
@@ -305,6 +346,11 @@ release_pane() {
   tmux set -p -u -t "$1" @claude_label
   tmux set -p -u -t "$1" @claude_label_busy
   tmux set -p -u -t "$1" @claude_label_wait
+  tmux set -p -u -t "$1" @claude_label_running
+  tmux set -p -u -t "$1" @claude_running
+  tmux set -p -u -t "$1" @claude_done
+  tmux set -p -u -t "$1" @claude_match_last
+  tmux set -p -u -t "$1" @claude_match_pos
   tmux set -p -u -t "$1" @claude_turn_over
   tmux set -p -u -t "$1" @claude_child
 }
@@ -326,13 +372,19 @@ run_hook() {
       tmux set -g "@claude_hooked_$sid" 1
       ;;
     stop)
-      # Claude's turn is over: its panes turn grey, except where a command it sent still runs (that
-      # one turns grey as soon as the command ends).
+      # Claude's turn is over: all its panes turn grey. Where a command it sent still runs, the
+      # cmd-* token stays, so its watcher still spots the end, and the border says "(command
+      # running)" until then.
       for pane in $(session_panes "$sid"); do
         tmux set -p -t "$pane" @claude_turn_over 1
         token=$(tmux show -pqv -t "$pane" @claude_busy)
-        [[ $token == cmd-* ]] && continue
-        clear_busy "$pane"
+        if [[ $token == cmd-* ]]; then
+          tmux set -p -t "$pane" @claude_running 1
+          # The command may have ended in between: its watcher then cleared the token.
+          [[ $(tmux show -pqv -t "$pane" @claude_busy) == cmd-* ]] || tmux set -p -u -t "$pane" @claude_running
+        else
+          clear_busy "$pane"
+        fi
         [[ -n $(tmux show -pqv -t "$pane" @claude_wait) ]] || paint "$pane" "$IDLE_STYLE"
       done
       ;;
@@ -376,6 +428,181 @@ watch_child() {
   ' _ "$1" "$here/pane.sh" "$PROMPT_TAG" </dev/null >/dev/null 2>&1 &
 }
 
+# A new command starts: forget the end and the matches of the previous one.
+new_command() {
+  tmux set -p -u -t "$1" @claude_done
+  tmux set -p -u -t "$1" @claude_match_last
+  tmux set -p -u -t "$1" @claude_match_pos
+}
+
+# The line Claude runs to be told when the command ends.
+wait_hint() {
+  printf 'wait: bash %q wait %s %s   # run with run_in_background\n' "$here/pane.sh" "$1" "$2"
+}
+
+# wait: sleep until the first event on command <id>, for Claude to run with run_in_background; it
+# tells Claude what happened in its first output line, and how in its exit code: 0 ended (the exit
+# status is in the text), 10 matched, 11 input?, 12 quiet, 3 gone, 4 superseded, 5 lost. It exits
+# quietly when the process that started it is gone. No time limit: Claude stops it or it ends.
+INPUT_RE='password|\[sudo\]|\(yes/no|\[y/N\]|passphrase'
+INPUT_STILL=5
+MATCH_THROTTLE=60
+MATCH_MAX=20
+REMOTE_RE='^(ssh|mosh|mosh-client|autossh|telnet)$'
+LOCAL_RE='^(bash|zsh|fish|sh|dash|ksh)$'
+
+wait_report_end() {
+  local pane=$1 id=$2 did rc ep dur
+  read -r did rc ep <<<"$(tmux show -pqv -t "$pane" @claude_done)" || true
+  if [[ ${did:-} != "$id" ]]; then rc=$3 ep=$(date +%s); fi
+  dur=$((ep - ${id%?????}))
+  ((dur >= 0)) || dur=0
+  printf 'ended pane=%s id=%s rc=%s duration=%dm%02ds\n' "$pane" "$id" "$rc" $((dur / 60)) $((dur % 60))
+  # The bottom of the screen, not the lines after the command: right even when the scrollback is full.
+  tmux capture-pane -p -J -t "$pane" -S -100 | { grep -v '^[[:space:]]*$' || true; } | tail -n 20
+}
+
+# Physical row <r> (absolute index) as it stands, for the history size <hs> just read.
+wait_row() { tmux capture-pane -p -t "$pane" -S $(($1 - hs)) -E $(($1 - hs)) 2>/dev/null; }
+
+# The complete lines (above the cursor) that showed up since the last call, in NEWL. Lines keep their
+# absolute index until the scrollback fills up; then tmux drops the oldest tenth at once, and indexes
+# shift. So <seen>, the last row read, is trusted only while that row still holds <seen_row>, the text
+# it had (the first time: the command line). Otherwise the new lines are those after the last non-blank
+# line read (<seen_text>), or after the command line. Uses the variables of run_wait.
+wait_scan() {
+  local last=$((hs + cy - 1)) from k i anchor row all=()
+  NEWL=()
+  if ((seen >= 0 && seen <= last)); then
+    row=$(wait_row "$seen")
+    if [[ -z $first_scan ]]; then
+      [[ $row == "$seen_row" ]] || seen=-1
+    elif [[ $mode == markers ]]; then
+      [[ $(wait_row $((seen + 1))) == *"$id"* ]] || seen=-1
+    else
+      [[ $(wait_row $((seen + 2 - ${height:-1}))) =~ $PROMPT_TAG ]] || seen=-1
+    fi
+  else
+    seen=-1
+  fi
+  if ((seen >= 0)); then
+    ((last > seen)) || return 0
+    from=$((seen + 1))
+    ((from > last - 400)) || from=$((last - 400))
+    mapfile -t NEWL < <(tmux capture-pane -p -J -t "$pane" -S $((from - hs)) -E $((cy - 1)))
+  else
+    mapfile -t all < <(tmux capture-pane -p -J -t "$pane" -S -200 -E $((cy - 1)))
+    k=-1
+    if [[ -n $seen_text ]]; then
+      for ((i = ${#all[@]} - 1; i >= 0; i--)); do
+        if [[ ${all[i]} == "$seen_text" ]]; then k=$i; break; fi
+      done
+    else
+      if [[ $mode == markers ]]; then anchor="START_$id\$"; else anchor=$PROMPT_TAG; fi
+      for ((i = ${#all[@]} - 1; i >= 0; i--)); do
+        if [[ ${all[i]} =~ $anchor ]]; then k=$i; break; fi
+      done
+      skip_left=0
+    fi
+    NEWL=("${all[@]:k+1}")
+  fi
+  seen=$last seen_row=$(wait_row "$last") first_scan=
+  # The first lines after the command are its own echo.
+  if ((skip_left > 0)); then
+    k=$((skip_left < ${#NEWL[@]} ? skip_left : ${#NEWL[@]}))
+    NEWL=("${NEWL[@]:k}")
+    skip_left=$((skip_left - k))
+  fi
+  for ((i = ${#NEWL[@]} - 1; i >= 0; i--)); do
+    if [[ ${NEWL[i]} =~ [^[:space:]] ]]; then seen_text=${NEWL[i]}; break; fi
+  done
+}
+
+run_wait() {
+  local pane=$1 id=$2 re=$3 quiet=$4 parent=$PPID
+  local cid mode start skip height rc now mid mt pos l cur in=
+  local seen=-1 seen_row= seen_text= first_scan=1 skip_left=0 last_fire=0 matches=() NEWL=()
+  local hs limit cy cx bytes curcmd snap=() sig prev_sig= sig_since=$SECONDS remote= local_polls=0
+  alive "$pane" || { echo "gone pane=$pane id=$id"; exit 3; }
+  read -r cid mode start skip height <<<"$(tmux show -pqv -t "$pane" @claude_cmd)" || true
+  [[ ${cid:-} == "$id" ]] || { echo "superseded pane=$pane id=$id"; exit 4; }
+  start=${start:-} skip=${skip:-1} height=${height:-}
+  # A wait re-armed after a match goes on from there (@claude_match_pos: row, its text, last non-blank
+  # line read), and keeps its throttle.
+  read -r mid mt <<<"$(tmux show -pqv -t "$pane" @claude_match_last)" || true
+  if [[ ${mid:-} == "$id" ]]; then
+    last_fire=$mt
+    pos=$(tmux show -pqv -t "$pane" @claude_match_pos)
+    seen=${pos%%$'\t'*} pos=${pos#*$'\t'}
+    seen_row=${pos%%$'\t'*} seen_text=${pos#*$'\t'}
+    [[ $seen =~ ^[0-9]+$ ]] || seen=-1
+    first_scan=
+  elif [[ -n $start ]]; then
+    seen=$((start - 1)) skip_left=$skip
+  fi
+  while :; do
+    kill -0 "$parent" 2>/dev/null || exit 0
+    alive "$pane" || { echo "gone pane=$pane id=$id"; exit 3; }
+    if rc=$(cmd_end "$pane" "$id" "$mode" "$start" "$skip" "$height"); then
+      wait_report_end "$pane" "$id" "$rc"
+      exit 0
+    fi
+    if [[ $(tmux show -pqv -t "$pane" @claude_cmd 2>/dev/null) != "$id "* ]]; then
+      alive "$pane" || { echo "gone pane=$pane id=$id"; exit 3; }
+      echo "superseded pane=$pane id=$id"
+      exit 4
+    fi
+    read -r hs limit cy cx bytes curcmd < <(tmux display-message -p -t "$pane" \
+      '#{history_size} #{history_limit} #{cursor_y} #{cursor_x} #{history_bytes} #{pane_current_command}') \
+      || { echo "gone pane=$pane id=$id"; exit 3; }
+    # The connection dropped: the pane went from ssh (or the like) back to a local shell, with no prompt
+    # of the command. A few polls in a row, so a command that merely ends is seen as ended first.
+    if [[ $curcmd =~ $REMOTE_RE ]]; then
+      remote=1 local_polls=0
+    elif [[ -n $remote && $curcmd =~ $LOCAL_RE ]]; then
+      if ((++local_polls >= 3)); then
+        echo "lost pane=$pane id=$id"
+        tmux capture-pane -p -J -t "$pane" -S -100 | { grep -v '^[[:space:]]*$' || true; } | tail -n 5
+        exit 5
+      fi
+    fi
+    if [[ -n $re ]]; then
+      wait_scan
+      for l in "${NEWL[@]}"; do
+        if [[ $l =~ $re ]]; then matches+=("$l"); fi
+      done
+      now=$(date +%s)
+      if ((${#matches[@]} > 0 && now - last_fire >= MATCH_THROTTLE)); then
+        tmux set -p -t "$pane" @claude_match_last "$id $now"
+        tmux set -p -t "$pane" @claude_match_pos "$seen"$'\t'"$seen_row"$'\t'"$seen_text"
+        echo "matched pane=$pane id=$id"
+        if ((${#matches[@]} > MATCH_MAX)); then matches=("${matches[@]: -MATCH_MAX}"); fi
+        printf '%s\n' "${matches[@]}"
+        exit 10
+      fi
+    fi
+    # The cursor line and the one above: new output, or a line redrawn in place, changes them.
+    mapfile -t snap < <(tmux capture-pane -p -t "$pane" -S $((cy - 1)) -E "$cy" 2>/dev/null)
+    sig="$hs $cy $cx $bytes ${snap[*]}"
+    if [[ $sig != "$prev_sig" ]]; then prev_sig=$sig sig_since=$SECONDS; fi
+    cur=
+    ((${#snap[@]} == 0)) || cur=${snap[${#snap[@]} - 1]}
+    shopt -s nocasematch
+    if [[ $cur =~ $INPUT_RE ]]; then in=1; else in=; fi
+    shopt -u nocasematch
+    if [[ -n $in ]] && ((SECONDS - sig_since >= INPUT_STILL)); then
+      echo "input? pane=$pane id=$id"
+      printf '%s\n' "$cur"
+      exit 11
+    fi
+    if [[ -n $quiet ]] && ((SECONDS - sig_since >= quiet)); then
+      echo "quiet pane=$pane id=$id"
+      exit 12
+    fi
+    sleep 0.5
+  done
+}
+
 cmd=${1:-}
 [[ -n $cmd ]] || usage
 shift
@@ -410,23 +637,25 @@ case $cmd in
     require_child "$1"
     takeback_pane "$1"
     id=$(new_id)
+    new_command "$1"
     tmux send-keys -t "$1" C-u
+    start=$(abs_line "$1")
     if [[ -n $(tmux show -pqv -t "$1" @claude_child) ]]; then
       # Child bash from enter: type the bare command; the next [claude <rc>] prompt reports its end.
-      start=$(abs_line "$1") height=$(prompt_height "$1")
+      height=$(prompt_height "$1")
       tmux set -p -t "$1" @claude_cmd "$id child $start 1 $height"
       tmux send-keys -t "$1" -l "$3"
       tmux send-keys -t "$1" Enter
-      mark_busy "$1" "$id" "$start" 1 "$height"
     else
       # No hook (REPL, zsh, console): wrap the command in markers. printf builds START_<id> so the
       # typed line never contains it; rc=$? is expanded by the remote shell.
-      tmux set -p -t "$1" @claude_cmd "$id markers"
+      tmux set -p -t "$1" @claude_cmd "$id markers $start 1"
       tmux send-keys -t "$1" -l "printf '%s_%s\n' START $id; $3; echo \"END_$id rc=\$?\""
       tmux send-keys -t "$1" Enter
-      mark_busy "$1" "$id"
     fi
+    mark_busy "$1" "$id"
     echo "id=$id"
+    wait_hint "$1" "$id"
     ;;
   paste)
     [[ $# -eq 3 ]] || usage
@@ -436,6 +665,7 @@ case $cmd in
     takeback_pane "$1"
     id=$(new_id)
     grep -qx "SCRIPT_$id" "$3" && die "script contains the heredoc delimiter"
+    new_command "$1"
     wrapper=$(mktemp)
     if [[ -n $(tmux show -pqv -t "$1" @claude_child) ]]; then
       {
@@ -456,15 +686,16 @@ case $cmd in
         [[ -z $(tail -c 1 "$3") ]] || echo
         printf 'SCRIPT_%s\n' "$id"
       } >"$wrapper"
-      tmux set -p -t "$1" @claude_cmd "$id markers"
-      start= skip= height=
+      start=$(abs_line "$1") skip=$(wc -l <"$wrapper")
+      tmux set -p -t "$1" @claude_cmd "$id markers $start $skip"
     fi
     tmux load-buffer -b "pane-$id" "$wrapper"
     rm -f "$wrapper"
     tmux send-keys -t "$1" C-u
     tmux paste-buffer -d -b "pane-$id" -t "$1"
-    mark_busy "$1" "$id" "$start" "$skip" "$height"
+    mark_busy "$1" "$id"
     echo "id=$id"
+    wait_hint "$1" "$id"
     ;;
   result)
     [[ $# -ge 2 && $# -le 3 ]] || usage
@@ -479,8 +710,7 @@ case $cmd in
       exit 124
     }
     if [[ $mode == markers ]]; then
-      # rc=[0-9] never matches the typed command line, which reads rc=$?.
-      until tmux capture-pane -p -J -t "$1" -S - | grep -Eq "END_$2 rc=[0-9]"; do
+      until rc=$(cmd_end "$1" "$2" markers "" "" "" -); do
         ((SECONDS < deadline)) || timeout_out "$@"
         sleep 0.5
       done
@@ -491,7 +721,8 @@ case $cmd in
       exit 0
     fi
     # The command is over once a [claude <rc>] prompt shows up below it.
-    until rc=$(cmd_done "$1" "$start" "$skip" "$height"); do
+    # Recorded already by the busy watcher or wait: no need to look again.
+    until rc=$(cmd_end "$1" "$2" "$mode" "$start" "$skip" "$height"); do
       ((SECONDS < deadline)) || timeout_out "$@"
       sleep 0.25
     done
@@ -508,9 +739,37 @@ case $cmd in
     exit 0
     ;;
   _done)
-    # Internal, for the busy watcher: the exit status of the command typed at line <start>, once over.
+    # Internal, for busy watchers started by an earlier version: the exit status of the command typed
+    # at line <start>, once over.
     [[ $# -eq 4 ]] || usage
     cmd_done "$@"
+    ;;
+  _end)
+    # Internal, for the busy watcher: the exit status of command <id>, once over, recorded in @claude_done.
+    [[ $# -eq 2 ]] || usage
+    read -r cid mode start skip height <<<"$(tmux show -pqv -t "$1" @claude_cmd)" || true
+    [[ ${cid:-} == "$2" ]] || exit 1
+    cmd_end "$1" "$2" "$mode" "${start:-}" "${skip:-}" "${height:-}"
+    ;;
+  wait)
+    [[ $# -ge 2 ]] || usage
+    pane=$1 id=$2 re= quiet=
+    shift 2
+    while (($# > 0)); do
+      case $1 in
+        --match) [[ $# -ge 2 && -n $2 ]] || usage; re=$2; shift 2 ;;
+        --quiet) [[ $# -ge 2 && $2 =~ ^[1-9][0-9]*$ ]] || usage; quiet=$2; shift 2 ;;
+        *) usage ;;
+      esac
+    done
+    [[ $pane =~ ^%[0-9]+$ ]] || die "target must be a pane ID such as %3, not '$pane'"
+    [[ $id =~ ^[0-9]{6,}$ ]] || die "bad id '$id'"
+    if [[ -n $re ]]; then
+      st=0
+      [[ '' =~ $re ]] || st=$?
+      ((st != 2)) || die "bad regex '$re'"
+    fi
+    run_wait "$pane" "$id" "$re" "$quiet"
     ;;
   claim)
     # The border speaks the user's language: Claude Code's language setting.
@@ -547,6 +806,12 @@ case $cmd in
     [[ $(tmux display-message -p -t "$1" '#{pane_in_mode}') == 0 ]] || die "pane $1 is in copy mode (the user is scrolling): ask them to leave it"
     takeback_pane "$1"
     tmux send-keys -t "$1" C-c
+    # In markers mode Ctrl-C drops the END echo with the rest of the line: record the end here.
+    read -r cid mode _ <<<"$(tmux show -pqv -t "$1" @claude_cmd)" || true
+    if [[ ${mode:-} == markers ]]; then
+      sleep 1
+      cmd_end "$1" "$cid" markers >/dev/null || record_done "$1" "$cid" 130
+    fi
     touch_busy "$1" force
     echo "sent Ctrl-C to $1"
     ;;

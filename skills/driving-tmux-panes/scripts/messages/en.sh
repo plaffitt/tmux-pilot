@@ -1,11 +1,14 @@
-# Texts Claude shows in a pane, sourced as bash: the border labels (M_BORDER*), and one M_<STEP> per
+# Texts Claude shows in a pane, sourced as bash: the 4 border labels (M_BORDER*: holding, working,
+# waiting for the user, a command still running while Claude's turn is over), and one M_<STEP> per
 # `onboarding <step>` call of the guided tour, where Claude speaks in the first person to the user.
 # The code only holds English. To translate (see SKILL.md, Language): write the same variables, with
 # translated values, to the file pane.sh names; keep the names, no tab in a border label, and since the
 # tour values go through printf, write %% for a literal % and keep the %s of M_RC (the exit status).
+# A label missing from a translation shows in English.
 M_BORDER='Claude is driving this pane'
 M_BORDER_BUSY='Claude is driving this pane (working)'
 M_BORDER_WAIT='Claude is driving this pane (your turn)'
+M_BORDER_RUNNING='Claude is driving this pane (command running)'
 M_PRESS_ENTER='Press Enter to continue'
 M_HELLO='Hi! Here is a short tour of how I drive your tmux panes. I took control of this pane: its border says "Claude is driving this pane". The [claude 0] prefix of the prompt marks a child bash I started, with a history file of its own, ~/.bash_history_claude: nothing I type here reaches your own history.'
 M_COLORS='While I read or type in a pane, it turns dark orange and its border adds (working). Do not type in it then: your keys would mix with mine and I could misread the output. When I wait for you to act, like right now, the pane turns purple and the border says (your turn): then it is your turn to type. After Enter, I run `sleep 3`: watch the pane stay orange.'

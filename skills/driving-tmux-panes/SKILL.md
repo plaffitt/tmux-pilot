@@ -1,7 +1,7 @@
 ---
 name: driving-tmux-panes
 description: Use for any work in the user's tmux panes - opening or splitting a new pane, running commands in or reading output from an existing one (an ssh session to a server, NAS or VM, a jump host, a console, a REPL) - or when keys sent with tmux send-keys land in the wrong pane, output cannot be found in the scrollback, or quoting breaks on the way into the pane. Also when the user asks for an onboarding, demo or tour of driving tmux panes.
-allowed-tools: Bash(bash ${CLAUDE_SKILL_DIR}/scripts/pane.sh list), Bash(bash ${CLAUDE_SKILL_DIR}/scripts/pane.sh state *), Bash(bash ${CLAUDE_SKILL_DIR}/scripts/pane.sh tail *), Bash(bash ${CLAUDE_SKILL_DIR}/scripts/pane.sh result *)
+allowed-tools: Bash(bash ${CLAUDE_SKILL_DIR}/scripts/pane.sh list), Bash(bash ${CLAUDE_SKILL_DIR}/scripts/pane.sh state *), Bash(bash ${CLAUDE_SKILL_DIR}/scripts/pane.sh tail *), Bash(bash ${CLAUDE_SKILL_DIR}/scripts/pane.sh result *), Bash(bash ${CLAUDE_SKILL_DIR}/scripts/pane.sh wait *)
 ---
 
 # Driving tmux panes
@@ -12,7 +12,7 @@ allowed-tools: Bash(bash ${CLAUDE_SKILL_DIR}/scripts/pane.sh list), Bash(bash ${
 
 The pane belongs to the user: they are reading it while you work in it. Go through `pane.sh` for every action. It targets panes by stable ID, refuses to type unless the pane sits idle at the prompt you expect, never wipes the screen, and finds your output without printing anything extra in the pane.
 
-Reading (`list`, `state`, `tail`, `result`) needs no approval. Typing (`send`, `paste`) asks the user every time, and the approval prompt shows the exact command that will land in their pane.
+Reading (`list`, `state`, `tail`, `result`, `wait`) needs no approval. Typing (`send`, `paste`) asks the user every time, and the approval prompt shows the exact command that will land in their pane.
 
 ## When to use
 
@@ -48,33 +48,42 @@ Below, `pane.sh` stands for `bash ${CLAUDE_SKILL_DIR}/scripts/pane.sh`.
 
 1. **Find the pane:** `pane.sh list` prints `%ID session:window.pane command title`. Use the `%ID` from then on: an index shifts as soon as the user opens or closes a pane, the ID does not. If 2 panes could match, ask.
 2. **Look at it:** `pane.sh state %3` prints the command running in the pane, copy mode, dead flag and the last 5 lines. Note the idle prompt, for example `admin@nas:~$`.
-3. **Mark the pane as yours:** `pane.sh claim %3` tints the pane's background and shows "Claude is driving this pane" in its top border, in the language of Claude Code's `language` setting (see Language below), so anyone looking at the screen knows who is typing. While you work in the pane, the pane turns dark orange and the border adds "(working)" to warn the user not to type there; a command sent with `send` or `paste` keeps it on until it ends. Installed as a plugin, its Stop hook turns the pane very dark grey when your turn ends: you may come back to the pane any time during a turn, so it stays orange until then. With the skill alone, the pane turns grey 5 s after your last action. Grey means you hold the pane but do nothing in it. When the session ends (exit, /clear), the SessionEnd hook gives its panes back. It only changes the local tmux, never the remote side.
+3. **Mark the pane as yours:** `pane.sh claim %3` tints the pane's background and shows "Claude is driving this pane" in its top border, in the language of Claude Code's `language` setting (see Language below), so anyone looking at the screen knows who is typing. While your turn runs and you work in the pane, the pane turns dark orange and the border adds "(working)" to warn the user not to type there. Installed as a plugin, its Stop hook turns all your panes very dark grey when your turn ends: you may come back to a pane any time during a turn, so it stays orange until then. A command you sent that still runs at that point (a 14-min test, `kubectl logs -f`) does not keep the pane orange: it turns grey too, with "(command running)" in orange in its border, until the command ends; reading the pane again (`state`, `tail`, `result`) brings orange back for your turn. With the skill alone, the pane turns grey 5 s after your last action, or once the command it runs ends. Grey means you hold the pane but do nothing in it. When the session ends (exit, /clear), the SessionEnd hook gives its panes back. It only changes the local tmux, never the remote side.
    - In a bash pane (bash 5.0 or later), then run `pane.sh enter %3 '<prompt-regex>'`. In a local pane it types 1 line, `history -d -1; bash --rcfile <skill>/scripts/child-rc.sh`: the child loads the user's `~/.bashrc`, writes its history to `~/.bash_history_claude`, and sources `scripts/claude-hook.sh`, which prefixes the prompt with `[claude <exit status of the last command>]`, for example `[claude 0]`. Behind ssh that file does not exist on the remote host, so it types `history -d -1; HISTFILE=~/.bash_history_claude bash`, waits for the child's prompt, then pastes the hook without its comments. Either way your commands stay out of the user's shell and history, and `history -d -1` erases the launch line itself before the child starts, so nothing leaks even if the pane is closed while the child runs. Run `state` afterwards: the prompt must show `[claude 0]`, and `send` works as usual inside the child. In a pane running a local bash, `send` and `paste` refuse until `enter` has run, so your commands never reach the user's history.
    - Skip `enter` in a REPL, zsh, fish or a console; `claim` still applies.
 4. **Send 1 command line:** `pane.sh send %3 'admin@nas:~\$ $' 'df -h /share'`
    - The 2nd argument is a regex the pane's last line must match.
    - It refuses if the pane is missing, dead, in copy mode (the user is scrolling), or not at that prompt.
-   - It clears half-typed input with `C-u`, types the line, and prints `id=<id>`.
+   - It clears half-typed input with `C-u`, types the line, and prints `id=<id>`, then a ready-to-run `wait:` line (see step 5).
    - The command is 1 line, without a trailing `;` or `&`.
-5. **Collect the result:** `pane.sh result %3 <id> 30` waits up to 30 s for the command to end, then prints its output and `rc=<exit status>`.
+5. **Wait for the end.** For a command that may run more than a few seconds, run the `wait:` line printed by `send` (`pane.sh wait %3 <id>`) with `run_in_background`, then end your turn or work elsewhere: you are notified the moment the command ends, with its exit status and last lines. Do not poll with `result` or `sleep`. Its first output line says what happened:
+   - `ended pane=%3 id=<id> rc=<n> duration=<XmYYs>`, then the last 20 non-blank lines of the screen. The exit status is in the text: `wait` itself exits 0.
+   - `matched`, then the new matching lines: with `--match '<regex>'`, for a command that never ends (`logs -f`), a new line matches. It fires once: re-arm it (same line again) to keep watching. A re-armed watch on the same pane fires at most once a minute, with the lines that matched meanwhile (20 at most).
+   - `input?`, then the last line: the command waits for a password, a `[sudo]` prompt, a `(yes/no` or `[y/N]` question, a passphrase. Check with `state`, run `handover`, ask the user, then re-arm.
+   - `quiet`: with `--quiet <seconds>`, no new output for that long.
+   - `gone` (the pane was closed), `superseded` (another command was sent, or the pane was released), `lost` (the ssh connection dropped: the pane is back to a local shell).
+   - After `interrupt`, the command is back at its prompt: `wait` reports `ended` with `rc=130`.
+   - If it ended without any of these lines, it was killed: re-arm it.
+   - The pane is grey with "(command running)" while you are not reading it.
+6. **Collect the result:** `pane.sh result %3 <id> 30` waits up to 30 s for the command to end, then prints its output and `rc=<exit status>`. Use it for short commands, and for the full output once `wait` reported `ended`: then it returns at once.
    - After `enter`, `send` types the bare command: `result` waits for the next `[claude <rc>]` prompt below the command, reads the exit status in it, and prints the output in between. The user sees only the command, its output and the prompt; the pane title is never touched.
    - Without `enter` (REPL, zsh, console), `send` wraps the command in `START_<id>` and `END_<id>` markers instead, and `result` ends with `END_<id> rc=<exit status>`.
-   - Exit code 124 means time ran out: it prints the last lines instead. Call `result` again to keep waiting, or ask before interrupting.
+   - Exit code 124 means time ran out: it prints the last lines instead. Run `wait` rather than calling `result` again, or ask before interrupting.
    - Your tool call has its own time limit: keep each wait under it and call again rather than passing a large timeout.
-6. **Multi-line scripts or tricky quoting:** write the script to a file with your file-writing tool, so the user sees its content, then run `pane.sh paste %3 'admin@nas' /path/to/script`, then `result`.
-   - `paste` wraps the file in `sh <<'SCRIPT_<id>'` and runs it in the remote `sh`, so quotes, backslashes and `\0` arrive intact.
+7. **Multi-line scripts or tricky quoting:** write the script to a file with your file-writing tool, so the user sees its content, then run `pane.sh paste %3 'admin@nas' /path/to/script`, then `wait` or `result`.
+   - `paste` wraps the file in `sh <<'SCRIPT_<id>'` and runs it in the remote `sh`, so quotes, backslashes and `\0` arrive intact. Like `send`, it prints `id=<id>` and a `wait:` line.
    - Never escape a script into `send`.
-7. **Before the next send,** run `state` again if the user may have typed in the pane meanwhile.
-8. **When you are done,** `pane.sh leave %3 '<prompt-regex>'` exits the child bash (it refuses if `enter` did not start one) and restores the pane and its window as they were. Without `enter`, `pane.sh release %3` does the restoring. If the user types `exit` in the child bash themselves, the pane is restored the same way: a watcher started by `enter` releases the pane once the child is gone (in a local pane the hook flags its exit; behind ssh the watcher spots the `exit` line bash prints after the last `[claude <rc>]` prompt). The user is back in their own shell, with its directory, variables and history untouched.
+8. **Before the next send,** run `state` again if the user may have typed in the pane meanwhile.
+9. **When you are done,** `pane.sh leave %3 '<prompt-regex>'` exits the child bash (it refuses if `enter` did not start one) and restores the pane and its window as they were. Without `enter`, `pane.sh release %3` does the restoring. If the user types `exit` in the child bash themselves, the pane is restored the same way: a watcher started by `enter` releases the pane once the child is gone (in a local pane the hook flags its exit; behind ssh the watcher spots the `exit` line bash prints after the last `[claude <rc>]` prompt). The user is back in their own shell, with its directory, variables and history untouched.
 
 ## Large or slow output
 
-- A piped command (`cmd | tail`) shows nothing until it ends. That is not a hang: wait with `result`.
-- Scrollback is capped by `history-limit` (`tmux show -gv history-limit`). For large output, redirect it to a file on the remote side, then read it in pages (`sed -n '1,200p' file`) with further `send` calls.
+- A piped command (`cmd | tail`) shows nothing until it ends. That is not a hang: run `wait`.
+- Scrollback is capped by `history-limit` (`tmux show -gv history-limit`): once it is full, the start of the output is cut. For a long command or large output, redirect it to a file on the remote side (`cmd > file 2>&1`), then read it in pages (`sed -n '1,200p' file`) with further `send` calls.
 
 ## Hand back to the user
 
-Stop and ask the user to act in the pane when `state`, `tail` or a timed-out `result` shows:
+Stop and ask the user to act in the pane when `wait` prints `input?`, or when `state`, `tail` or a timed-out `result` shows:
 
 - a password or sudo prompt (`password`, `[sudo]`);
 - a host-key question (`(yes/no`);
@@ -91,6 +100,7 @@ Run `pane.sh handover %3` when you ask: the pane turns dark purple and its borde
 | Loose prompt regex such as `.` | Match the user and host of the prompt |
 | `clear` before each command | Markers already isolate the output |
 | Escaping a script inside `send` | Write a file, then `paste` |
-| Long `result` timeout that hits the tool's limit | Short waits, called again |
+| Long `result` timeout that hits the tool's limit | `wait` with `run_in_background` |
+| Polling a long command with `result` or `sleep` | `wait` with `run_in_background`, then end your turn |
 | Waiting on a password prompt | `sudo -n`, then hand back |
 | Reading other panes "for context" | Only the target pane |
